@@ -6,3 +6,4 @@
 * [Final Report Slides](final_report_slides.html)
 * [Zillow Scraper Script](scraper.py)
 * [Zillow Formatter Script](formatter.py)
+* [Zip Codes](zip_codes.json)
