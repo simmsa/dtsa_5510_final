@@ -1,0 +1,2523 @@
+---
+title: "Unsupervised Real Estate Price Prediction - Final Report - Deliverable 1"
+subtitle: "DTSA 5510 Unsupervised Algorithms in Machine Learning - University of Colorado Boulder"
+author: "Andrew Simms"
+date: today
+
+format:
+    html:
+        mainfont: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif'
+        theme: [custom.scss]
+        monofont: "Menlo"
+        highlight-style: monokai
+        mermaid:
+          theme: dark
+        code-overflow: wrap
+
+reference-lotation: margin
+citation-lotation: margin
+table-of-contents: true
+toc-location: left
+code-line-numbers: false
+toc-title: 'Table of Contents'
+number-sections: true
+bibliography: ref.bib
+# embed-resources: true
+# keep-ipynb: true
+---
+
+<!--
+
+# Deliverable 1
+
+A Jupyter notebook showing a supervised learning problem description, EDA procedure, analysis (model building and training), result, and discussion/conclusion.
+
+Suppose your work becomes so large that it doesn’t fit into one notebook (or you think it will be less readable by having one large notebook). In that case, you can make several notebooks or scripts in a GitHub repository (as deliverable 3) and submit a report-style notebook or pdf instead.
+
+If your project doesn't fit into Jupyter notebook format (E.g. you built an app that uses ML), write your approach as a report and submit it in a pdf form.
+
+-->
+
+# Introduction
+
+## Project Topic
+
+This project utilizes unsupervised and supervised machine learning (ML) algorithms to perform price
+prediction on real-world real estate listings downloaded from [Zillow.com][zillow] and with
+additional listing information scraped from [Redfin.com][redfin].  To start @sec-data describes the
+source of the data and introduces the dataset. @sec-clean uses common techniques to clean the
+dataset, removing outliers, and sanitizing columns, building a dataset that can be input into varied
+ML algorithms. @sec-eda explores the dataset and produces visualizations for the author and audience
+to gain an initial understanding of the data. This section also explores the interactions between
+features and begins to analyze collinearity.
+
+In @sec-model we dive deep into both unsupervised and supervised ML algorithms and build models to
+cluster, then regress, on the data, aiming to create subsets of data that more accurately model
+price than one large dataset. @sec-results discusses the results of the modeling and aims to select
+a best path for price prediction. Finally @sec-conclusion details the outcomes of this project and
+discusses areas of further research. All files and code for this project can be found here:
+<https://github.com/simmsa/dtsa_5510_final>.
+
+To narrow down the listings, provide simpler data collection, and make the result more relevant for
+the author, this document focuses on real estate listings in the Denver Colorado metropolitan area.
+As this project utilizes a relatively small amount of real world data, the outcomes may not be
+definitive. Through this project we will aim to highlight the shortcomings of this analysis and
+discuss methods for improvement of data size and data quality. As we build our models we are aiming
+to find a good balance of accuracy and execution speed. We want to be careful of creating a model
+that is simple for this use case, but too complex for a larger problem.
+
+## Project Goal
+
+The goal of this project is to build pricing model to predict real estate listing prices on new real
+estate listings to seek out listings that may be undervalued. To achieve this goal we plan to use a
+ML divide and conquer strategy, which uses clustering and principal component techniques to reduce
+the data into smaller groups. These smaller groups will be passed into many supervised regression
+algorithms and the accuracy will be combined to determine the best performing combination of models.
+
+For this dataset, our target variable is price, a floating-point value. To model this variable
+regression algorithms are a suitable choice. It is worth noting that typical regression algorithms
+are compatible with floating-point features. We plan to convert as much of the data as possible to
+floating point values. As this aspect is not the primary focus of this project, certain features may
+be omitted to streamline the construction and analysis of the models. Given this, we strive to keep
+the core values of the data. And our goal for cleaning and processing the data is to build a unified
+source of truth that will be utilized by all ML models.
+
+## Project Plan
+
+In @fig-simple we outline the steps necessary to reach our goal of predicting the price of a real
+estate listing.
+
+```{mermaid}
+%%| label: fig-simple
+%%| fig-cap: Unsupervised Real Estate Price Prediction Flowchart
+
+flowchart TD
+    A("Data Cleaning / Wrangling")
+    B("Imputation")
+    C("Feature Selection")
+    subgraph unsupervised ["Unsupervised ML"]
+        subgraph clustering ["Clustering"]
+            D("KMeans")
+            E("AgglomerativeClustering")
+        end
+        subgraph dimred ["Dimensionality Reduction"]
+            L("Principal Component Analysis")
+        end
+    end
+
+    subgraph supervised ["Supervised Regression"]
+        F("Linear Regression")
+        G(AdaBoostRegressor)
+        H(XGBRegressor)
+    end
+
+    J["Analysis"]
+
+    K["Selection"]
+
+
+    A --> B --> C
+
+    C --> unsupervised --> supervised --> J --> K
+```
+
+# Python Setup {#sec-code-setup}
+
+The following code section includes the python libraries used to execute the code contained in this
+document. See @sec-code-env for complete details on the environment and libraries used to execute
+the code in this document.
+
+```{python}
+import json
+import random
+import itertools
+import copy
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+
+from sklearn.cluster import AgglomerativeClustering, KMeans
+from sklearn.decomposition import PCA
+from sklearn.ensemble import AdaBoostRegressor
+from sklearn.impute import KNNImputer
+from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import RidgeCV
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_percentage_error
+from sklearn.metrics import silhouette_score
+from sklearn.model_selection import train_test_split
+from sklearn.feature_selection import SelectKBest
+from sklearn.feature_selection import f_regression
+from sklearn.preprocessing import StandardScaler
+
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+import statsmodels.formula.api as smf
+
+import tensorflow as tf
+
+import xgboost as xgb
+
+sns.set_theme()
+```
+
+## Visualization Functions
+
+```{python}
+def brand_plot(has_subplots=False):
+    if has_subplots == False:
+        plt.suptitle("Real Estate Listing Price Prediction")
+
+    txt = "DTSA 5510 - 2023 Summer 1 - Andrew Simms"
+    plt.figtext(
+        0.95,
+        -0.01,
+        txt,
+        wrap=True,
+        horizontalalignment="right",
+        fontsize=6,
+        fontstyle="italic",
+    )
+    plt.tight_layout()
+```
+
+# Data Information {#sec-data}
+
+## Data Source
+
+In the United States (US) real estate listing data is typically not readily available to the
+consumer. Typically the [Multiple Listing Service (MLS)][MLS] contains these listings and which they
+make available to realtors. To provide a product, companies like [Zillow][Zillow] and
+[Redfin][Redfin] acquire these listings and provide a service that makes it easy for users to find
+real estate properties for sale. Ideally, to source real estate listing data, we would use [MLS],
+but they do not offer a readily available API. But we can use data from Zillow and Redfin, we just
+have to find methods for scraping each respective site.
+
+Data is acquired from [Zillow][Zillow] using our custom made [`scraper.py`][scraper.py] python script.  This script
+interfaces with the [Zillow][zillow] `GetSearchPageState` API and downloads current real estate
+listings by zip code for the [included zip codes][zip_codes.json]. A framework for this type of
+scraping can be found in [this Zillow web scraping tutorial][scrapfly]. This `json` is then
+formatted with [`formatter.py`][formatter.py] and saved to a `csv` file.
+
+To add additional features we use the addresses from Zillow and query additional data from
+[Redfin][Redfin] using the [Python-Redfin](https://github.com/reteps/redfinref) library. Querying
+Redfin adds additional information about school districts, home features, neighborhood, and listing
+condition that should be able add additional features that improve the pricing model. This data is
+combined with the Zillow data and save into a `csv` file.
+
+### Data Acquisition Flowchart
+
+:::{.column-page}
+
+```{mermaid}
+%%| label: fig-daq
+%%| fig-cap: Data Acquisition Flowchart
+
+flowchart LR
+    subgraph daq ["Data Acquisition"]
+        direction LR
+        subgraph zillow ["Zillow.com"]
+            A["scraper.py"]
+            B["GetSearchPageState API"]
+            C["Zillow Listings"]
+            D["json"]
+            E["formatter.py"]
+            F["csv"]
+        end
+
+        subgraph redfin ["Redfin.com"]
+            G["redfin_scraper.py"]
+            H["csv"]
+        end
+
+        K["Final Output"]
+
+
+        A --> B --> C --> D --> E --> F
+
+        F -- Addresses --> G --> H --> K
+    end
+```
+
+:::
+
+The following code reads the saved `csv` dataset into a pandas `DataFrame` object. In @sec-data-description columns 0 to 87 originate
+from Zillow and columns 88 and above are from Redfin.
+
+
+```{python}
+df = pd.read_csv("2023_04_22-17_57_52_10_mi_radius_unique_denver_area_w_redfin.csv")
+```
+
+## Data Description {#sec-data-description}
+
+The initial data is shown using `df.info()` as executed below:
+
+:::{.column-page}
+
+```{python}
+df.info(verbose=True, show_counts=True)
+```
+
+:::
+
+This shows that that the initial dataset has 718 rows and 161 columns. The dataset is 810 kB in
+size. Both of these values show that the has sufficient information for further processing.
+
+In this analysis we can see that there are many columns with large numbers of null values,
+additionally, while we have many features with `float64` values, we may need to convert some
+features to floating point values.
+
+## Data Filtering Parameters
+
+As we start to query the data we will save our notes on the dataset in `filter_params`. This is
+meant to capture values that we will use for data cleaning in @sec-clean. Note that we will use the
+python convention of using all caps for variables that should not be changed and are global to the
+file.
+
+```{python}
+filter_params = {}
+```
+
+## Initial Filtering/High Level Cleaning
+
+Before we begin our analysis must perform some initial data cleaning to remove obvious shortcomings
+in our listing data.
+
+### Filtering Columns {#sec-filter-columns}
+
+Our first step will be the removal of columns with large counts of null values.
+While some of the columns have high quality data, we need both high quality and high quantity data
+to input into our ML models. To filter this data out we count the number of null values in each
+column and drop columns that have null value percentages higher than `NULL_MAX_PERCENT`:
+
+
+```{python}
+filter_params["NULL_MAX_PERCENT"] = 0.25
+
+null_counts = df.isnull().sum()
+
+columns_to_drop = null_counts[null_counts / len(df) > filter_params["NULL_MAX_PERCENT"]].index
+
+df_before_columns_count = len(df.columns)
+df = df.drop(columns_to_drop, axis=1)
+df_after_columns_count = len(df.columns)
+
+print(f"Before Filtering Column Count: {df_before_columns_count}")
+print(f"After Filtering Column Count: {df_after_columns_count}")
+print(f"Column Filtering Removal Count: {df_before_columns_count - df_after_columns_count}")
+```
+
+```{python}
+# df.columns[1:]
+df.info()
+```
+
+### Filtering Price Rows {#sec-filter-price}
+
+Next we will drop rows where the price does not exist:
+
+```{python}
+df = df.dropna(subset='hdpData_homeInfo_price')
+```
+
+
+## Notable Columns
+
+As our dataset has a high number of features we will focus our efforts on the columns that we expect will
+provide the highest value to our goal of accurate price prediction.
+
+### Target Column, `hdpData_homeInfo_price` {#sec-col-price}
+
+The target column `hdpData_homeInfo_price` contains real estate listing
+prices, expressed using floating point numbers as US dollars (\$). If the real estate market is
+operating efficiently this number will properly capture the value of all features of the listing.
+[Zillow][zillow] is the source for this column.
+
+```{python}
+df["hdpData_homeInfo_price"].info()
+```
+
+```{python}
+df['hdpData_homeInfo_price'].describe().apply(lambda x: format(x, 'f'))
+```
+
+As we can see from the code sections above `hdpData_homeInfo_price` has 718 values that range from
+\$0 to \$2,379,900, with the mean value being ~\$ 1,250,000 and the median value being \$840,000.
+We will explore this column more completely when we clean this column in @sec-price-clean.
+
+We do see that the minimum price is \$0, which most likely means a null value. Lets notate this in
+the filter parameters by setting a minimum price. This value is a best guess based on local
+knowledge:
+
+```{python}
+filter_params["MINIMUM_PRICE"]= 250_000
+```
+
+### Feature Column, `hdpData_homeInfo_livingArea` {#sec-col-sqft}
+
+The feature column `hdpData_homeInfo_livingArea` contains the measurement of square footage in feet
+of the living area of the listing ($\text{ft}^2$). The source of this column is Zillow. It is a floating point value of type `float64`.
+This measurement typically does not include the garage, or unfinished living space.  Effectively
+this number can be interpreted as the interior size of the listing. There is no guarantee that this
+measurement is absolutely correct, and the seller may have an incentive to inflate this number in an
+attempt to get a higher price.
+
+```{python}
+df['hdpData_homeInfo_livingArea'].info()
+```
+
+```{python}
+df['hdpData_homeInfo_livingArea'].describe().apply(lambda x: format(x, 'f'))
+```
+
+As we can see from the code sections above `hdpData_homeInfo_livingArea` has 718 values that range from
+522 to 50,275, with the mean value being 3,173 and the median value being 2,704.
+We will explore this column more completely when we clean this column in @sec-sqft-clean.
+
+We do see an extreme value (~50,000) for the max square footage which should be added to the filter.
+This value is most likely a error with data entry or listing categorization:
+
+```{python}
+filter_params["MAX_SQFT"]= 10000
+```
+
+### Feature Column, `schools_rating`
+
+The feature column `schools_rating` is a rating of schools in the area and is called the
+[GreatSchools Rating][great_schools]. We are including this value as quality of local area schools
+may have an effect on overall price.
+
+```{python}
+df['schools_rating'].info()
+```
+
+```{python}
+df['schools_rating'].describe().apply(lambda x: format(x, 'f'))
+```
+
+As we can see from the code sections above `schools_rating` has 681 values that range from
+2.4 to 9.4. with the mean value of 6.22 and the median value of 6.5.
+
+This column seems to good quality data, but will require imputation to fill in missing values. We
+will add this to our filter parameters
+
+```{python}
+filter_params["IMPUTE_COLS"] = ['schools_rating']
+```
+
+### Feature Column, `exterior_information_BUILDING_QUALITY_CODE`
+
+The feature column `exterior_information_BUILDING_QUALITY_CODE` is a categorial value from Redfin
+that contains string ratings of the bulding quality. This value lives deep within the Redfin api and
+no further description is available.
+
+```{python}
+df['exterior_information_BUILDING_QUALITY_CODE'].info()
+```
+
+```{python}
+df['exterior_information_BUILDING_QUALITY_CODE'].value_counts()
+```
+
+As we can see from the code sections above `exterior_information_BUILDING_QUALITY_CODE` has 718 values that range from "Poor" to "Excellent". All listings have a rating.
+
+As this is a categorical value it will need to be encoded for further processing. We will add this
+note to the filter parameters:
+
+```{python}
+filter_params["ENCODE_COLS"] = ['exterior_information_BUILDING_QUALITY_CODE']
+```
+
+# Data Cleaning {#sec-clean}
+
+Prior to constructing our ML models, the listing data must be cleaned. The goal of this section is to produce a single data set that is formatted and ready for ML model construction. This process should build a solid foundation for building different types of models. As a reminder we have already remove columns with large numbers of numbers of null values (@sec-filter-columns) and removed rows with null prices (@sec-filter-price).
+
+The data cleaning process will require the following steps:
+
+* Eliminate columns that will not be utilized, or alternatively, initially select feature columns
+* Simplify column names
+* Check for duplicate columns
+* Encode columns that contain categorical values
+
+As a reminder we will print out the filter param dict:
+
+```{python}
+filter_params
+```
+
+## DataFrame Setup
+
+```{python}
+df.index = df['zpid']
+len(df.columns)
+```
+
+```{python}
+df.columns
+```
+
+## Downselecting Feature Columns
+
+In this section we perform an initial selection of features. The intent is to remove features that
+will not be utilized.
+
+```{python}
+original_df = df.copy()
+
+df = df[
+    [
+        "beds",
+        "baths",
+        "latLong_latitude",
+        "latLong_longitude",
+        "hdpData_homeInfo_price",
+        "hdpData_homeInfo_livingArea",
+        "hdpData_homeInfo_zestimate",
+        "hdpData_homeInfo_taxAssessedValue",
+        "schools_rating",
+        "year_built",
+        "year_renovated",
+        "sq_ft_finished",
+        "total_sq_ft",
+        "lot_sq_ft",
+        "taxable_land_value",
+        "taxable_improvement_value",
+        "heating_&_cooling_HEATING_TYPE_CODE",
+        "exterior_information_BUILDING_QUALITY_CODE",
+        "property_information_SUBDIVISION_NAME",
+        "property_information_GROUND_FLOOR_SQUARE_FEET",
+        "property_information_BUILDING_SQUARE_FEET",
+        "property_information_LEGAL_DESCRIPTION",
+        "parking_&_garage_information_PARKING_TYPE",
+        "parking_&_garage_information_GARAGE_PARKING_SQUARE_FEET",
+        "parking_&_garage_information_GARAGE_CODE",
+        "lot_information_LAND_SQUARE_FOOTAGE",
+    ]
+]
+len(df.columns)
+```
+
+## Simplifying Column Names
+
+```{python}
+prefixes_to_replace = [
+    "hdpData_homeInfo_",
+    "latLong_",
+    "heating_&_cooling_",
+    "exterior_information_",
+    "property_information_",
+    "parking_&_garage_information_",
+    "lot_information",
+]
+
+for prefix in prefixes_to_replace:
+    df.columns = df.columns.str.replace(prefix, "")
+
+def camelCase(input_string):
+    if input_string.count('_') == 0:
+        return input_string
+
+    output = ''.join(x for x in input_string.title() if x.isalnum())
+    return output[0].lower() + output[1:]
+
+df.columns = [camelCase(x) for x in df.columns]
+```
+
+```{python}
+df.info()
+```
+
+## Column Conversion
+
+There are a few columns that seem like they should have numeric values but show as object. Here we
+will attempt to convert the type. If we are unsuccessful we will drop the column:
+
+```{python}
+columns_to_convert_to_numeric = ["groundFloorSquareFeet", "buildingSquareFeet",
+"garageParkingSquareFeet", "landSquareFootage"]
+
+for col in columns_to_convert_to_numeric:
+    df[col] = pd.to_numeric(df[col].str.replace(",", ""))
+
+df.info()
+```
+
+## Checking for Collinearity
+
+To check for duplicate columns we will set a threshold and run a correlation function on each row,
+saving the column names that are above the threshold:
+
+```{python}
+
+def check_collinearity(input_df, correlation_threshold=0.9):
+    correlated_pairs = []
+
+    for col in input_df.columns:
+        if input_df[col].dtype == "float64":
+            corr = input_df.corrwith(input_df[col], numeric_only=True).sort_values(ascending=False)[1:]
+
+            for key, val in corr.to_dict().items():
+                if val > correlation_threshold:
+                    correlated_pairs.append([col, key])
+
+    print(correlated_pairs)
+
+check_collinearity(df)
+```
+
+From this analysis we can see that many features are collinear. We are going to use both `price` and the `zestimate` (Zillow
+Estimate) to compare our model against, so we will keep these. In the following code section we will
+remove one of the collinear features
+
+```{python}
+df = df.drop(['sqFtFinished', 'buildingSquareFeet', "landSquareFootage"], axis=1)
+check_collinearity(df)
+```
+
+```{python}
+df.info()
+```
+
+## Filtering Categorical Columns
+
+Prior to encoding categorical columns we would like to check their contents and quality. We would
+like to choose categorical columns with minimal value counts. Initially
+we will print the values of each column:
+
+```{python}
+
+for col in df.columns:
+    if df[col].dtype != "float64":
+        print(col)
+        print(df[col].value_counts())
+        print()
+```
+
+Based on the output we will eliminate `legalDescription` which contains all unique values, and
+`parkingType` which is similar to `garageCode`.
+
+```{python}
+df = df.drop(['legalDescription', 'parkingType'], axis=1)
+```
+
+`subdivisionName` requires further analysis:
+
+```{python}
+df['subdivisionName'].value_counts()
+```
+
+Based on this output `subdivisionName` has too many values for conversion to a category, so we will
+remove it as well:
+
+```{python}
+df = df.drop(['subdivisionName'], axis=1)
+```
+
+We now have 3 categorical values that can be encoded.
+
+## Filtering Unrealistic Prices
+
+Next we will remove listings where the price is unrealistic. This is based on the analysis in
+@sec-col-price:
+
+```{python}
+df = df[df['price'] > filter_params["MINIMUM_PRICE"]]
+```
+
+## Filtering Square Footage Outliers
+
+Next we will remove listings that are larger than expected. This was first analyzed in 
+@sec-col-sqft:
+
+```{python}
+df = df[df['livingArea'] < filter_params["MAX_SQFT"]]
+
+```
+
+Additionally we wil filter out properties that are on lots greater that 5 acres. These are typically
+farm or agricultural properties and they are not needed in our pricing model.
+
+```{python}
+filter_params['MAX_LOT_SQFT'] = 10 * 43560
+df = df[df["lotSqFt"] < filter_params["MAX_LOT_SQFT"]]
+```
+
+## Correlation Visualization
+
+To continue to understand the data we will visualize the relationship between columns:
+
+```{python}
+df_float = df.select_dtypes(include=['float64'])
+
+def plot_correlation(input_df, title, annot=True, tick_rot=0, width=12, height=8):
+    corr = input_df.corr(numeric_only=True)
+    fig, ax = plt.subplots(figsize=(width, height))
+    sns.heatmap(
+        corr,
+        cmap="vlag",
+        annot=annot,
+        xticklabels=corr.columns,
+        yticklabels=corr.columns,
+        vmin=-1.0,
+        vmax=1.0,
+        fmt=".2f",
+        cbar=False,
+    ).set(title=title)
+    ax.xaxis.tick_top()
+    ax.tick_params(length=0)
+    plt.xticks(rotation=tick_rot)
+    plt.yticks(rotation=0)
+    brand_plot()
+    plt.show()
+```
+
+:::{.column-page}
+
+```{python}
+#| label: fig-initial-corr
+#| fig-cap: "Initial Correlation Matrix of Listings DataFrame"
+
+plot_correlation(df, "Initial Correlation Matrix", annot=False, tick_rot=45)
+```
+:::
+
+In @fig-initial-corr we see that we have a few strong positive correlations and a large amount of
+weak correlations. Overall this visualization provides strong reinforcement that our data is ready
+for further work.
+
+
+## One Hot Encoding (OHE)
+
+One Hot Encoding (OHE) is the process of converting a categorical value into a binary value based on
+the category. A categorical value with 5 values will be converted to 5 columns of binary values with
+a 1 in the column that the data corresponds to. 
+
+Prior to this conversion it will be helpful to save the column names that are not one hot encoded:
+
+```{python}
+float_cols = [col for col in df.columns if df[col].dtype == 'float64']
+```
+
+In the code below we use pandas `get_dummies`
+function to OHE our categorical features:
+
+
+```{python}
+for col in df.columns:
+    if df[col].dtype != "float64":
+        one_hot = pd.get_dummies(df[col], prefix=col, drop_first=True)
+        df = df.drop(col, axis=1)
+        df = pd.concat([df, one_hot], axis=1)
+
+df.info()
+```
+
+:::{.column-page}
+
+```{python}
+#| label: fig-ohe-corr
+#| fig-cap: "OHE Correlation Matrix of Listings DataFrame"
+
+plot_correlation(df, "OHE Listing Correlation Matrix", annot=False, tick_rot=90, width=16, height=10)
+```
+
+:::
+
+@fig-ohe-corr includes the correlation relationships of the OHE values. We speculate that may add a small amount
+of value to to our standard regression models, and may be moderately beneficial for our random forest models.
+
+## Imputation
+
+To ensure a fair compairson between models, we will pass identical data to each model. Some models
+have distinct requirements for their input values, and some cannot handle missing values. This
+requires that an imputation be performed on the data. For this we will use the `KNNImputer` from
+@scikit-learn.
+
+```{python}
+def impute_df(input_df):
+    imputer = KNNImputer()
+    columns = input_df.columns
+    input_df = pd.DataFrame(imputer.fit_transform(input_df))
+    input_df.columns = columns
+    return input_df
+
+
+df = impute_df(df)
+
+df.info()
+```
+
+## Building Training and Test `DataFrame`s
+
+Now that we have our data frames we can split them into training and test sets. Our target is
+going to be `price` and all other columns are going to
+be our features. We are using `train_test_split` to partition the data.
+
+```{python}
+test_size = 0.2
+random_state = 42
+target = "price"
+
+df = df.sort_index()
+
+y = df[target]
+z = df["zestimate"]
+
+lat = df["latitude"]
+lng = df["longitude"]
+
+# x = df.drop(["price", "zestimate", "latitude", "longitude"], axis=1)
+x = df.drop(["price", "zestimate"], axis=1)
+
+x_focus = df.drop(["price", "zestimate", "latitude", "longitude"], axis=1)
+
+x_train, x_test, y_train, y_test, z_train, z_test, lat_test, lat_train, lng_test, lng_train, all_train, all_test, x_focus_train, x_focus_test = train_test_split(
+    x, y, z, lat, lng, df, x_focus, test_size=test_size, random_state=random_state
+)
+```
+
+## Preparation for Model Comparison
+
+To compare models we need to compute metrics for comparison. We have chosen to compute the mean
+squared error (MSE), the root mean squared error (RMSE), and $R^2$. As we are using the same
+dataset for all models we can safely use $R^2$ as a comparison. The code below calculates these
+values and saves them in `model_stats` for comparison and visualization.
+
+```{python}
+model_stats = {
+    "Root Mean Squared Error": [],
+    "$R^2$": [],
+}
+
+
+def calc_model_stats(name, i_y_test, i_y_pred):
+    assert len(i_y_test) == len(
+        i_y_pred
+    ), "Test and prediction array lengths do not match!"
+
+    calc_mean_squared_error = mean_squared_error(i_y_test, i_y_pred)
+    calc_root_mean_squared_error = mean_squared_error(i_y_test, i_y_pred, squared=False)
+    calc_mean_absolute_percentage_error = mean_absolute_percentage_error(
+        i_y_test, i_y_pred
+    )
+    calc_r2_score = r2_score(i_y_test, i_y_pred)
+
+    model_stats["Root Mean Squared Error"].append(
+        [name, calc_root_mean_squared_error]
+    )
+    model_stats["$R^2$"].append([name, calc_r2_score])
+
+
+def plot_model_stats(fig_width=12, fig_height=6):
+    num_rows = 1
+    num_cols = 2
+    fig, axes = plt.subplots(
+        nrows=num_rows, ncols=num_cols, figsize=(fig_width, fig_height)
+    )
+
+    iteration = 1
+    for metric, values in model_stats.items():
+        labels = [x[0] for x in values]
+        values = [x[1] for x in values]
+        plt.subplot(num_rows, num_cols, iteration)
+        p = plt.bar(labels, values)
+        plt.title(f"{metric} by Model")
+        if metric == "$R^2$":
+            plt.bar_label(p, ["{:.4f}".format(x) for x in values])
+        else:
+            plt.bar_label(p, ["{:,}".format(int(x)) for x in values])
+        plt.xticks(rotation=-45)
+        iteration += 1
+
+    brand_plot()
+    plt.show()
+```
+
+# Exploratory Data Analysis (EDA) {#sec-eda}
+
+## Feature Importance {#sec-feat-imp}
+
+To start our EDA, we must build our knowledge of the available features. One way to visualize the
+importance of the individual features is to use a random forest algorithm that supports plotting the
+importance. One such library is `XGBoost`:
+
+:::{.column-page}
+
+```{python}
+#| label: fig-feat-imp
+#| fig-cap: "Feature Importance via `XGBoost`"
+
+xgb_model = xgb.XGBRegressor(n_jobs=1, booster="gbtree").fit(x_focus_train, y_train)
+y_pred = xgb_model.predict(x_focus_test)
+
+fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+
+xgb.plot_importance(xgb_model, title="Feature Importance", ax=ax)
+brand_plot()
+plt.show()
+```
+
+:::
+
+@fig-feat-imp illustrates the importance of `taxAssessedValue` and `livingArea`, which score the
+highest. Other floating point features also score preform well, and most binary features score
+relatively low. Interestingly, `beds` scored much higher than `baths`. For now we will keep all these features and perform analysis on the most import
+columns of data.
+
+
+## Column Exploration
+
+In this section we will describe and query columns that are immediately relevant to our goal of
+predicting real estate listing prices.
+
+### `hdpData_homeInfo_price` {#sec-price-clean}
+
+This column contains the target variable, price, in floating point format. The following code
+sections explores this column:
+
+```{python}
+#| label: fig-price-dist
+#| fig-cap: "`hdpData_homeInfo_price` column visualized in a KDE plot"
+
+sns.kdeplot(data=df, x="price", bw_adjust=0.2)
+sns.rugplot(data=df, x="price")
+plt.title("Real Estate Listing - Raw Price Distribution")
+brand_plot()
+```
+
+In @fig-price-dist we can see that price is heavily distributed in the bottom fifth of the plot and
+that there are many outliers that skew the distribution. In the code below we calculate statistical
+descriptions of this column:
+
+```{python}
+df['price'].describe().apply(lambda x: format(x, 'f'))
+```
+
+Now lets zoom in on the data and visualize the prices between the 25% and 75% quantiles:
+
+```{python}
+#| label: fig-zoom-price-dist
+#| fig-cap: "Filtered `price` distribution of quantile 1 - quantile 3"
+
+q1, q3 = df['price'].quantile([0.25, 0.75])
+price_zoomed_df = df[df['price'].between(q1, q3)]
+
+sns.kdeplot(data=price_zoomed_df, x="price", bw_adjust=0.2)
+sns.rugplot(data=price_zoomed_df, x="price")
+plt.title(f"Real Estate Listing - {q1} - {q3} Price Distribution")
+brand_plot()
+```
+
+In @fig-zoom-price-dist we visualize the central range of the pricing data. Here we can clearly see
+that the prices are not evenly distributed, that prices spike at near the 100K threshold for each
+price range.
+
+### `taxAssessedValue` {#sec-tax-clean}
+
+This column contains the feature column `taxAssessedValue`. This feature is highly correlated with `price`
+and ass seen in @sec-feat-imp, this may be our primary feature for our regression models:
+
+```{python}
+#| label: fig-tax-dist
+#| fig-cap: "`taxAssessedValue` feature visualized in a KDE plot"
+
+sns.kdeplot(data=df, x="taxAssessedValue", bw_adjust=0.2)
+sns.rugplot(data=df, x="taxAssessedValue")
+plt.title("Real Estate Listing - Raw taxAssessedValue Distribution")
+brand_plot()
+```
+
+In @fig-tax-dist we see a distribution similar to `price` with a high peak in the lower range and a
+long upper tail. 
+
+```{python}
+df['taxAssessedValue'].describe().apply(lambda x: format(x, 'f'))
+```
+
+Let's visualize the central section of the density data:
+
+```{python}
+#| label: fig-zoom-tax-dist
+#| fig-cap: "Filtered `taxAssessedValue` distribution of quantile 1 - quantile 3"
+
+q1, q3 = df['taxAssessedValue'].quantile([0.25, 0.75])
+price_zoomed_df = df[df['taxAssessedValue'].between(q1, q3)]
+
+sns.kdeplot(data=price_zoomed_df, x="taxAssessedValue", bw_adjust=0.2)
+sns.rugplot(data=price_zoomed_df, x="taxAssessedValue")
+plt.title(f"Real Estate Listing - {q1} - {q3}  taxAssessedValue Distribution")
+brand_plot()
+```
+
+In @fig-zoom-tax-dist we see fewer peaks at the rounded numbers and a smoother distribution. Notice
+that the range of this chart is \$400,000 to \$700,000 vs. \$600,000 to \$1,200,000 for `price`.
+
+### `livingArea` {#sec-sqft-clean}
+
+This column contains the feature column `livingArea`. This feature is highly correlated with `price`
+and may be another primary feature for our regression models: The following code sections explores this
+column:
+
+```{python}
+#| label: fig-sqft-dist
+#| fig-cap: "`livingArea` feature visualized in a KDE plot"
+
+sns.kdeplot(data=df, x="livingArea", bw_adjust=0.2)
+sns.rugplot(data=df, x="livingArea")
+plt.title("Real Estate Listing - Raw livingArea Distribution")
+brand_plot()
+```
+
+In @fig-sqft-dist we find that most listings are between 1,500 and 3,500 square feet. Just like
+`price` above there are many outliers that skew the distribution.
+
+```{python}
+df['livingArea'].describe().apply(lambda x: format(x, 'f'))
+```
+
+Now lets zoom in on the data and visualize the square footage between the 25% and 75% quantiles:
+
+```{python}
+#| label: fig-zoom-sqft-dist
+#| fig-cap: "Filtered `livingArea` distribution of quantile 1 - quantile 3"
+
+q1, q3 = df['livingArea'].quantile([0.25, 0.75])
+price_zoomed_df = df[df['livingArea'].between(q1, q3)]
+
+sns.kdeplot(data=price_zoomed_df, x="livingArea", bw_adjust=0.2)
+sns.rugplot(data=price_zoomed_df, x="livingArea")
+plt.title(f"Real Estate Listing - {q1} - {q3}  livingArea Distribution")
+brand_plot()
+```
+
+In @fig-zoom-sqft-dist we find no discernible patterns in the density. As expected, their appears to be an even
+distribution of values in the middle of the feature.
+
+
+## Clustering Visualization
+
+For our unsupervised ML models our plan is to cluster the data then perform a regression on the
+clustered data. But how do we choose our clusters? One option is to iterate over many possible
+clusters and analyze quality of the clusters using the silhouette score. In the code section below
+we create a function, `optmize_clusters` that take a dataframe and two column names and a clustering
+model. It then iterates over a number of clusters and calculates the silhouette score, saving the
+highest score. In the code section below we build this function:
+
+```{python}
+max_all_silhouette_scores = -1
+max_all_silhouette_scores_pair = None
+max_all_silhouette_scores_n_clusters = 0
+max_all_model = None
+
+def optimize_clusters(input_df, x_col, y_col, model, model_label, min_clusters=3, max_clusters=20):
+    input_df = input_df.copy()
+    lat = input_df[x_col].to_numpy()
+    lng = input_df[y_col].to_numpy()
+
+    coords = np.dstack((lat, lng))[0]
+
+    wcss = []
+    silhouette_scores = []
+    max_silhouette_score = -1 
+    max_silhouette_score_cluster_num = 0
+
+    for i in range(min_clusters, max_clusters):
+        # kmeans = KMeans(n_clusters=i, init="k-means++", n_init=20, random_state=42).fit(coords)
+        cluster_model = model
+        cluster_model.n_clusters = i
+        cluster_model.fit(coords)
+        # wcss.append(cluster_model.inertia_)
+        this_score = silhouette_score(coords, cluster_model.labels_)
+        silhouette_scores.append(this_score)
+
+        if this_score > max_silhouette_score:
+            max_silhouette_score = this_score
+            max_silhouette_score_cluster_num = i
+
+    # plt.title("Coords Inertia vs n_clusters")
+    # plt.plot(range(min_clusters, max_clusters), wcss)
+    # brand_plot()
+    # plt.show()
+
+    plt.title("Coords Silhouette Score vs n_clusters")
+    plt.plot(range(min_clusters, max_clusters), silhouette_scores)
+    brand_plot()
+    plt.show()
+
+    # kmeans = KMeans(n_clusters=11, init="k-means++", n_init=20, random_state=42).fit(coords)
+
+    global max_all_silhouette_scores
+    global max_all_silhouette_scores_pair
+    global max_all_silhouette_scores_n_clusters
+    global max_all_model
+
+    best_cluster_model = model
+    model.n_clusters = max_silhouette_score_cluster_num
+    best_cluster_model.fit(coords)
+
+    if max_silhouette_score > max_all_silhouette_scores:
+        max_all_silhouette_scores = max_silhouette_score
+        max_all_silhouette_scores_pair = [x_col, y_col]
+        max_all_silhouette_scores_n_clusters = max_silhouette_score_cluster_num
+        max_all_model = best_cluster_model
+
+
+    input_df["location_cluster"] = best_cluster_model.labels_
+
+    sns.scatterplot(data=input_df, x=x_col, y=y_col, hue='location_cluster', palette="tab10")
+    plt.legend([],[], frameon=False)
+    plt.title(f"{model_label} - Best Cluster {x_col} vs. {y_col}\nSS: {max_silhouette_score}, N_Clusters: {max_silhouette_score_cluster_num}")
+    brand_plot()
+    plt.show()
+
+optimize_clusters(df, "longitude", "latitude", KMeans(init="k-means++", n_init="auto", random_state=42), "KMeans")
+# optimize_clusters(df, "longitude", "latitude", AgglomerativeClustering(), "AgglomerativeClustering")
+# optimize_clusters(df, "longitude", "latitude", KMeans(n_init="auto", random_state=42))
+# optimize_clusters(df, "longitude", "latitude", AgglomerativeClustering(linkage="complete"), "AgglomerativeClustering")
+```
+
+## Old Cluster Selection
+
+```{python}
+
+# optimize_clusters(df, "price", "livingArea", KMeans(init="k-means++", n_init=20, random_state=42))
+
+
+# float_cols.remove("beds")
+# float_cols.remove("baths")
+
+# col_permutations = list(itertools.permutations(float_cols, 2))
+
+
+# print(col_permutations)
+# print(len(col_permutations))
+
+# random_perms = random.sample(col_permutations, 25)
+
+# for perm in col_permutations:
+# for perm in random_perms:
+#     # optimize_clusters(df, perm[0], perm[1], KMeans(init="k-means++", n_init=20, random_state=42))
+#     optimize_clusters(
+#         df,
+#         perm[0],
+#         perm[1],
+#         AgglomerativeClustering(linkage="complete"),
+#         "AgglomerativeClustering",
+#     )
+
+# df["location_cluster"] = max_all_model.labels_
+# sns.scatterplot(data=df, x=max_all_silhouette_scores_pair[0], y=max_all_silhouette_scores_pair[1], hue='location_cluster', palette="tab10")
+# plt.title(f"Best Cluster {max_all_silhouette_scores_pair}, SS: {max_all_silhouette_scores}")
+# brand_plot()
+
+```
+
+
+```{python}
+# Hand Picked Pairs
+# best_pairs = [["lotSqFt", "longitude"], ["longitude", "latitude"]]
+```
+
+# Machine Learning Models {#sec-model}
+
+Our ML models will use a general architecture for price prediction. We will use an
+unsupervised ML algorithm to create a subset of the data, and pass this subset to multiple
+supervised regression algorithms. The unsupervised ML models will use clustering (`kMeans` and
+`AgglomerativeClustering`) and the principal component analysis (`PCA`) to subsect the data. The
+Supervised ML models will use the regression models, `LinearRegression`, `AdaBoostRegressor`, and
+`XGBRegressor`. We will use both root mean squared error (RSME) and $R^2$ to capture the results
+from these models. Results for these models will be shared in @sec-results.
+
+## Baseline Single Feature Linear Regression
+
+Our first model will be a baseline comparison of vanilla linear regression. We are using the
+scikit-learn implementation and passing in the "most important" feature `taxAssessedValue`:
+
+```{python}
+linear_regression = LinearRegression()
+linear_regression.fit(x_train["taxAssessedValue"].values.reshape(-1, 1), y_train)
+y_pred = linear_regression.predict(x_test["taxAssessedValue"].values.reshape(-1, 1))
+
+calc_model_stats(f"LinearRegression", y_test, y_pred)
+```
+
+
+## Principal Component Analysis (PCA)
+
+PCA is a dimensionality reduction technique that encodes high-dimensional data into lower
+dimensional data while retaining the most important information. In the code section below we
+perform `PCA` for a range of values, calculating $R^2$ at each step and capturing the best result.
+In comparison to the clustering algorithms we will see later in this section, this code is
+relatively simple. We save the best value of this result as `PCA-{iteration}-{model}`. In this
+section we use `LinearRegression` (`LR`), `AdaBoostRegressor` (`AB`) and `XGBRegressor` (`XG`) as
+our supervised regression models.
+
+```{python}
+best_rsquared = 0
+best_y_pred = None
+best_i = None
+best_model = None
+
+for i in range(2, 30):
+    pca = PCA(n_components=i)
+    x_train_reduced = pca.fit_transform(x_train)
+    x_test_reduced = pca.transform(x_test)
+
+
+    linear_regression = LinearRegression()
+    linear_regression.fit(x_train_reduced, y_train)
+    y_pred = linear_regression.predict(x_test_reduced)
+    calc_r2_score = r2_score(y_pred, y_test)
+
+    if calc_r2_score > best_rsquared:
+        best_rsquared = calc_r2_score
+        best_y_pred = y_pred
+        best_i = i
+        best_model = "LR"
+
+    adaboost_model = AdaBoostRegressor(random_state=42, n_estimators=100).fit(
+        x_train_reduced, y_train
+    )
+    y_pred = adaboost_model.predict(x_test_reduced)
+
+    calc_r2_score = r2_score(y_pred, y_test)
+    if calc_r2_score > best_rsquared:
+        best_rsquared = calc_r2_score
+        best_y_pred = y_pred
+        best_i = i
+        best_model = "AB"
+
+    booster = "gbtree"
+    xgb_model = xgb.XGBRegressor(n_jobs=1, booster=booster).fit(x_train_reduced, y_train)
+    y_pred = xgb_model.predict(x_test_reduced)
+
+    calc_r2_score = r2_score(y_pred, y_test)
+    if calc_r2_score > best_rsquared:
+        best_rsquared = calc_r2_score
+        best_y_pred = y_pred
+        best_i = i
+        best_model = "XG"
+
+calc_model_stats(f"PCA {best_i}-{best_model}", y_test, best_y_pred)
+```
+
+## Feature Selection
+
+To the cluster modeling process we create an optimized list of features it `selected_features_list`.
+This list represents the best performing features by length, i.e. the first item in the list is the
+best performing single feature, the second item in the list is the best performing double feature,
+etc. We do this by using the "scikit-learn" `SelectKBest` library. Additionally, we use linear
+regression to compute a model with these features and save the result at the `SelectKBestLR` model.
+
+```{python}
+best_rsquared = 0
+best_features = None
+best_y_pred = None
+selected_features_list = []
+
+for i in range(2, len(x_train.columns) - 1):
+    selector = SelectKBest(score_func=f_regression, k=i)
+    X_reduced = selector.fit_transform(x_train, y_train)
+    selected_features = pd.DataFrame(
+        selector.inverse_transform(X_reduced),
+        index=x_train.index,
+        columns=x_train.columns,
+    )
+
+    selected_columns = selected_features.columns[selected_features.var() != 0]
+    selected_features_list.append(list(selected_columns))
+
+    X_reduced = x_train[selected_columns]
+    linear_regression = LinearRegression()
+    linear_regression.fit(x_train[selected_columns], y_train)
+    y_pred = linear_regression.predict(x_test[selected_columns])
+
+    calc_r2_score = r2_score(y_pred, y_test)
+    if calc_r2_score > best_rsquared:
+        best_rsquared = calc_r2_score
+        best_features = selected_columns
+        best_y_pred = y_pred
+
+calc_model_stats("SelectKBestLR", y_test, best_y_pred)
+```
+
+```{python}
+print(selected_features_list)
+```
+
+
+## Cluster Selection
+
+This section focuses on calculating the highest scoring feature columns for a given number of
+clusters. We use the `silhouette_score` as the metric calculating the quality of the clusters. The
+class `ClusterFeatureSelector` creates a permutation of column names and iterates over these and the
+number of clusters and calculates the `silhouette_score`. We save the best cluster score and feature
+columns in `best_cluster_features` and return them from `build_by_dimension`. It is recommended to
+keep the `dimension` argument low (2 or 3) to avoid long run times.
+
+```{python}
+MIN_CLUSTERS = 2
+MAX_CLUSTERS = 5
+
+
+class ClusterFeatureSelector:
+    def __init__(
+        self,
+        input_df,
+        input_cols,
+        model,
+        min_clusters=MIN_CLUSTERS,
+        max_clusters=MAX_CLUSTERS,
+    ):
+        cluster_cols = input_cols.copy()
+
+        cluster_cols.remove("price")
+        cluster_cols.remove("zestimate")
+        cluster_cols.remove("beds")
+        cluster_cols.remove("baths")
+
+        self.cluster_features = cluster_cols
+        self.input_df = input_df
+        self.model = model
+
+        self.min_clusters = min_clusters
+        self.max_clusters = max_clusters
+
+    def build_by_dimension(self, dimension):
+        best_cluster_features = {}
+
+        feature_combinations = list(
+            itertools.combinations(self.cluster_features, dimension)
+        )
+
+        for feature_combo in feature_combinations:
+            input_df = self.input_df.copy()
+            cluster_input_list = list([input_df[i].to_numpy() for i in feature_combo])
+
+            cluster_input = np.dstack(cluster_input_list)[0]
+
+            for i in range(self.min_clusters, self.max_clusters + 1):
+                cluster_model = copy.copy(self.model)
+                cluster_model.n_clusters = i
+                cluster_model.fit(cluster_input)
+                this_score = silhouette_score(cluster_input, cluster_model.labels_)
+
+                if i not in best_cluster_features:
+                    best_cluster_features[i] = {"sil_score": 0, "features": None}
+
+                if this_score > best_cluster_features[i]["sil_score"]:
+                    best_cluster_features[i]["sil_score"] = this_score
+                    best_cluster_features[i]["features"] = feature_combo
+
+        return best_cluster_features
+```
+
+```{python}
+clusterFeatureSelector = ClusterFeatureSelector(df, float_cols, KMeans(init="k-means++", n_init=20, random_state=42))
+two_d_cluster_features = clusterFeatureSelector.build_by_dimension(2)
+
+# three_d_cluster_features = clusterFeatureSelector.build_by_dimension(3)
+# print(three_d_cluster_features)
+```
+
+## Regression Using Clusters
+
+The `ClusterRegression` class breaks the dataset up into smaller clusters and runs a regression
+algorithm on these clusters. In theory this seems like a simple concept, but it introduces many
+variables in the form of feature selection, cluster selection, and number of clusters. To solve this
+we pre calculate the best features and clusters in the previous two sections. We use these here to
+find the optimal cluster. Th
+
+```{python}
+class ClusterRegression:
+    def __init__(
+        self,
+        train,
+        test,
+        target,
+        cluster_model,
+        regression_model,
+        min_clusters=MIN_CLUSTERS,
+        max_clusters=MAX_CLUSTERS,
+    ):
+        self.train = train
+        self.test = test
+        self.target = target
+        self.cluster_model = cluster_model
+        self.regression_model = regression_model
+        self.min_clusters = min_clusters
+        self.max_clusters = max_clusters
+        self.best_rsquared = 0
+        self.best_regression_features = None
+        self.best_cluster_features = None
+        self.best_n_clusters = None
+        self.best_pred = None
+
+    def find_optimal_cluster(self, regression_features, cluster_features):
+        train_df = self.train.copy()
+        test_df = self.test.copy()
+
+        for regression_feat_cols in regression_features:
+            for cluster_num in cluster_features.keys():
+                this_regression_features = regression_feat_cols
+                this_cluster_features = cluster_features[cluster_num]["features"]
+                n_clusters = cluster_num
+
+                train_cluster_input_list = list([train_df[i].to_numpy() for i in this_cluster_features])
+                test_cluster_input_list = list([test_df[i].to_numpy() for i in this_cluster_features])
+
+                train_cluster_input = np.dstack(train_cluster_input_list)[0]
+                test_cluster_input = np.dstack(test_cluster_input_list)[0]
+                this_train_df = train_df.copy()
+                this_test_df = test_df.copy()
+
+                cluster_model = copy.copy(self.cluster_model)
+                cluster_model.n_clusters = cluster_num
+                cluster_model.fit(train_cluster_input)
+                this_train_df["cluster_label"] = cluster_model.labels_
+                train_labels = cluster_model.labels_
+                test_labels = cluster_model.fit_predict(test_cluster_input)
+                this_test_df["cluster_label"] = test_labels
+
+                # Build test and train dataframes for each cluster
+                train_clusters = {label: pd.DataFrame() for label in train_labels}
+                for key in train_clusters.keys():
+                    train_clusters[key] = this_train_df[:][this_train_df['cluster_label'] == key]
+
+                test_clusters = {label: pd.DataFrame() for label in test_labels}
+                for key in test_clusters.keys():
+                    test_clusters[key] = this_test_df[:][this_test_df['cluster_label'] == key]
+
+                test_cluster_df_list = []
+                for key in train_clusters.keys():
+                    train_cluster_df = train_clusters[key]
+                    test_cluster_df = test_clusters[key]
+                    regression_model = copy.copy(self.regression_model)
+                    regression_model = self.regression_model.fit(train_cluster_df[this_regression_features], train_cluster_df[self.target])
+                    cluster_y_pred = regression_model.predict(test_cluster_df[this_regression_features])
+                    test_cluster_df["y_pred"] = cluster_y_pred
+                    test_cluster_df_list.append(test_cluster_df)
+
+                pred_df = pd.concat(test_cluster_df_list)
+                pred_df = pred_df.sort_index()
+
+                test_pred = y_test.sort_index()
+                rsquared = r2_score(test_pred, pred_df['y_pred'])
+
+                if rsquared > self.best_rsquared:
+                    self.best_rsquared = rsquared
+                    self.best_regression_features = this_regression_features
+                    self.best_cluster_features = this_cluster_features
+                    self.best_n_clusters = cluster_num
+                    self.best_pred = pred_df['y_pred']
+
+        print(f"Best:\n\tR2: {self.best_rsquared}\n\tRegression: {self.best_regression_features}\n\tCluster: {self.best_cluster_features}\n\tn_clusters: {self.best_n_clusters}")
+        print()
+
+    def get_best_rsquared(self):
+        return self.best_rsquared
+
+    def get_best_pred(self):
+        return self.best_pred
+
+    def get_best_features(self):
+        return self.best_features
+
+    def get_best_clusters(self):
+        return self.best_clusters
+
+```
+
+```{python}
+
+
+linear_cluster_regressor = ClusterRegression(all_train, all_test, target, KMeans(init="k-means++", n_init="auto", random_state=42), LinearRegression())
+linear_cluster_regressor.find_optimal_cluster(selected_features_list, two_d_cluster_features)
+y_pred_lcr = linear_cluster_regressor.get_best_pred()
+
+calc_model_stats("OptClusterLinReg", y_test.sort_index(), y_pred_lcr)
+```
+
+
+```{python}
+xgb_cluster_regressor = ClusterRegression(all_train, all_test, target, KMeans(init="k-means++", n_init="auto", random_state=42), xgb.XGBRegressor(n_jobs=1, booster="gbtree"))
+xgb_cluster_regressor.find_optimal_cluster(selected_features_list, two_d_cluster_features)
+y_pred_xgbcr = xgb_cluster_regressor.get_best_pred()
+
+calc_model_stats("OptClusterXGB", y_test.sort_index(), y_pred_xgbcr)
+
+plot_model_stats()
+
+```
+
+## Removing Colinear Features
+
+```{python}
+target = df_float['price']
+features = df_float.drop(['price'], axis=1)
+
+# from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+# def calculate_vif_(X, thresh=5.0):
+#     X = X.assign(const=1)  # faster than add_constant from statsmodels
+#     variables = list(range(X.shape[1]))
+#     dropped = True
+#     while dropped:
+#         dropped = False
+#         vif = [variance_inflation_factor(X.iloc[:, variables].values, ix)
+#                for ix in range(X.iloc[:, variables].shape[1])]
+#         vif = vif[:-1]  # don't let the constant be removed in the loop.
+#         maxloc = vif.index(max(vif))
+#         if max(vif) > thresh:
+#             print('dropping \'' + X.iloc[:, variables].columns[maxloc] +
+#                   '\' at index: ' + str(maxloc))
+#             del variables[maxloc]
+#             dropped = True
+
+#     print('Remaining variables:')
+#     print(X.columns[variables[:-1]])
+#     return X.iloc[:, variables[:-1]]
+
+# calculate_vif_(features)
+
+# print(df_float['price'].corr)
+```
+
+
+
+```{python}
+# from sklearn.linear_model import LinearRegression
+# from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_percentage_error
+
+# lr = LinearRegression(fit_intercept=True).fit(x_train, y_train)
+
+# lr.score(x_train, y_train)
+
+# y_pred = lr.predict(x_test)
+
+# print(r2_score(y_pred, y_test))
+
+# def calc_model_stats(name, i_y_test, i_y_pred):
+#     assert len(i_y_test) == len(
+#         i_y_pred
+#     ), "Test and prediction array lengths do not match!"
+
+#     calc_mean_squared_error = mean_squared_error(i_y_test, i_y_pred)
+#     calc_root_mean_squared_error = mean_squared_error(i_y_test, i_y_pred, squared=False)
+#     calc_mean_absolute_percentage_error = mean_absolute_percentage_error(
+#         i_y_test, i_y_pred
+#     )
+#     calc_r2_score = r2_score(i_y_test, i_y_pred)
+
+#     regression_model_stats["Root Mean Squared Error"].append(
+#         [name, calc_root_mean_squared_error]
+#     )
+#     regression_model_stats["$R^2$"].append([name, calc_r2_score])
+```
+
+
+## Forward Selection
+
+```{python}
+# train, test = train_test_split(df_float, random_state=42)
+
+# import statsmodels.formula.api as smf
+
+
+# Given a dataframe and target column
+# def forward_selection(input_df, target_column, p_value_threshold = 0.05):
+#     features = list(input_df.columns)
+#     features.remove(target_column)
+
+#     selected_features = []
+#     best_model = None
+#     best_rsquared = 0
+
+#     while len(features) > 0:
+#         this_best_rsquared = 0
+#         this_best_feature = None
+#         this_p_value_max = 0
+#         this_best_model = None
+
+#         for feature in features:
+#             these_features = selected_features + [feature]
+#             ols_model = smf.ols(
+#                 formula=f"{target_column} ~ {' + '.join(these_features)}", data=input_df
+#             )
+#             result = ols_model.fit()
+#             rsquared = result.rsquared
+#             # aic = result.aic
+#             # bic = result.bic
+#             pvalues = result.pvalues
+
+#             if rsquared > this_best_rsquared:
+#                 this_best_rsquared = rsquared
+#                 this_p_value_max = pvalues.max()
+#                 this_best_feature = feature
+#                 this_best_model = result
+
+
+#         # print(f"rsquared for {len(selected_features) + 1}: {this_best_rsquared}")
+#         # print(f"this_p_value_max for {len(selected_features) + 1}: {this_p_value_max}")
+#         if this_p_value_max > p_value_threshold:
+#             break
+
+#         # Only continue if rsquared is increasing
+#         if this_best_rsquared > best_rsquared:
+#             selected_features.append(this_best_feature)
+#             best_model = this_best_model
+#             best_rsquared = this_best_rsquared
+#             features.remove(this_best_feature)
+#             print(selected_features)
+#         else:
+#             break
+
+#     return (best_model, best_rsquared, selected_features)
+
+
+# # print(result.summary())
+
+# lr_train_fs_model, lr_train_fs_rsquared, lr_train_fs_features = forward_selection(train, "price")
+
+# lr_test_fs_pred = lr_train_fs_model.predict(test)
+
+# lr_fs_rsquared = r2_score(test["price"], lr_test_fs_pred)
+# print("Forward Selection Test R Squared: ", lr_fs_rsquared)
+```
+
+## Backward Selection
+
+Start with all features and iterate to remove features until all features have a p value that is
+less then the threshold p value
+
+```{python}
+def backward_selection(input_df, target_column, p_value_threshold = 0.05):
+    features = list(input_df.columns)
+    features.remove(target_column)
+
+    removed_features = []
+    best_model = None
+    best_rsquared = 0
+
+    while len(features) > 0:
+        this_best_rsquared = 0
+        this_p_value_max = 0
+        this_p_value_max_feature = None
+        this_best_model = None
+
+        for feature in features:
+            these_features = features.copy()
+            these_features.remove(feature)
+            ols_model = smf.ols(
+                formula=f"{target_column} ~ {' + '.join(these_features)}", data=input_df
+            )
+            result = ols_model.fit()
+            rsquared = result.rsquared
+            pvalues = result.pvalues
+            # The intercept is not a valid feature so we need to remove it from the pvalue comparison
+            pvalues = pvalues.drop('Intercept')
+            pvalue_max = pvalues.max()
+
+
+            if pvalue_max > this_p_value_max:
+                this_best_rsquared = rsquared
+                this_p_value_max = pvalues.max()
+                this_p_value_max_feature = pvalues.idxmax()
+                this_best_model = result
+
+
+        if this_p_value_max > p_value_threshold:
+            removed_features.append(this_p_value_max_feature)
+            best_model = this_best_model
+            best_rsquared = this_best_rsquared
+            print(f"Removing {this_p_value_max_feature} with pvalue: {this_p_value_max}")
+            features.remove(this_p_value_max_feature)
+        else:
+            break
+
+    return (best_model, best_rsquared, features)
+
+# lr_train_bs_model, lr_train_bs_rsquared, lr_train_bs_features = backward_selection(train, "price")
+
+# lr_test_bs_pred = lr_train_bs_model.predict(test)
+
+# lr_bs_rsquared = r2_score(test["price"], lr_test_bs_pred)
+# print("Backward Selection Test R Squared: ", lr_bs_rsquared)
+# print("Backward Selection Features: ", lr_train_bs_features)
+```
+
+# Neural Network
+
+```{python}
+# input_shape = x_train.shape[1]
+
+# # Scale the input data
+# scaler = StandardScaler()
+# x_train_scaled = scaler.fit_transform(x_train)
+# x_test_scaled = scaler.transform(x_test)
+
+# # Define the neural network architecture
+# model = tf.keras.Sequential([
+#     tf.keras.layers.Dense(128, activation='relu', input_shape=(input_shape,)),
+#     tf.keras.layers.Dense(128, activation='relu'),
+#     tf.keras.layers.Dense(64, activation='relu'),
+#     tf.keras.layers.Dense(1)
+# ])
+
+# # Compile the model
+# model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+#               loss='mean_squared_error')
+
+# # Train the model with early stopping and reduced learning rate
+# early_stopping = tf.keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True)
+# reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(factor=0.1, patience=3)
+
+# model.fit(x_train_scaled, y_train, epochs=50, batch_size=32, verbose=0,
+#           validation_data=(x_test_scaled, y_test),
+#           callbacks=[early_stopping, reduce_lr])
+
+# # Make predictions on x_test
+# y_pred = model.predict(x_test_scaled)
+
+
+# calc_model_stats("NeuralNetwork1", y_test, y_pred)
+# plot_model_stats()
+
+# # Define the neural network architecture
+# model = tf.keras.Sequential([
+#     tf.keras.layers.Dense(256, activation='relu', input_shape=(input_shape,)),
+#     tf.keras.layers.Dense(256, activation='relu'),
+#     tf.keras.layers.Dense(128, activation='relu'),
+#     tf.keras.layers.Dense(64, activation='relu'),
+#     tf.keras.layers.Dense(1)
+# ])
+
+# # Define learning rate schedule
+# lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+#     initial_learning_rate=0.01,
+#     decay_steps=1000,
+#     decay_rate=0.9
+# )
+# optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+
+# # Compile the model
+# model.compile(optimizer=optimizer, loss='mean_squared_error')
+
+# # Train the model with early stopping and reduced learning rate
+# early_stopping = tf.keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True)
+# reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(factor=0.1, patience=3)
+
+# model.fit(x_train_scaled, y_train, epochs=50, batch_size=32, verbose=1,
+#           validation_data=(x_test_scaled, y_test),
+#           callbacks=[early_stopping, reduce_lr])
+
+# # Make predictions on x_test
+# y_pred = model.predict(x_test_scaled)
+
+# calc_model_stats("NeuralNetwork2", y_test, y_pred)
+# plot_model_stats()
+
+
+# # Define the neural network architecture
+# model = tf.keras.Sequential([
+#     tf.keras.layers.Dense(256, activation='relu', input_shape=(input_shape,)),
+#     tf.keras.layers.Dense(256, activation='relu'),
+#     tf.keras.layers.Dense(128, activation='relu'),
+#     tf.keras.layers.Dense(64, activation='relu'),
+#     tf.keras.layers.Dense(1)
+# ])
+
+# # Choose an optimizer with gradient clipping
+# optimizer = tf.keras.optimizers.Adam(learning_rate=0.001, clipvalue=1.0)
+
+# # Compile the model with mean squared error loss
+# model.compile(optimizer=optimizer, loss='mean_squared_error')
+
+# # Train the model with early stopping and reduced learning rate
+# early_stopping = tf.keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True)
+# reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(factor=0.1, patience=3)
+
+# model.fit(x_train_scaled, y_train, epochs=50, batch_size=32, verbose=0,
+#           validation_data=(x_test_scaled, y_test),
+#           callbacks=[early_stopping, reduce_lr])
+
+# # Make predictions on x_test
+# y_pred = model.predict(x_test_scaled)
+
+# calc_model_stats("NeuralNetwork3", y_test, y_pred)
+# plot_model_stats()
+
+```
+
+
+## `kMeans Clustering`
+
+```{python}
+# from sklearn.cluster import KMeans
+
+# lat = df['hdpData_homeInfo_latitude'].to_numpy()
+# lng = df['hdpData_homeInfo_longitude'].to_numpy()
+
+# coords = np.dstack((lat, lng))[0]
+
+# print(coords.shape)
+
+# wcss = []
+# silhouette_scores = []
+
+# for i in range(3, 50):
+#     kmeans = KMeans(n_clusters=i, init="k-means++", n_init=20, random_state=42).fit(coords)
+#     wcss.append(kmeans.inertia_)
+#     silhouette_scores.append(silhouette_score(coords, kmeans.labels_))
+
+# plt.title("Coords Inertia vs n_clusters")
+# plt.scatter(range(3, 50), wcss)
+# plt.show()
+
+# plt.title("Coords Silhouette Score vs n_clusters")
+# plt.scatter(range(3, 50), silhouette_scores)
+# plt.show()
+
+# plt.title("Coords Silhouette Score vs n_clusters")
+# plt.plot(range(3, 50), silhouette_scores)
+# plt.show()
+
+# print("Coords silhouette_scores", silhouette_scores)
+```
+
+```{python}
+# kmeans = KMeans(n_clusters=8, init="k-means++", n_init=20, random_state=42).fit(coords)
+
+# df["location_cluster"] = kmeans.labels_
+
+# sns.scatterplot(data=df, x=x, y=y, s=df[s], hue='location_cluster', palette="tab10")
+```
+
+## Visualizing Location Cluster prices
+
+```{python}
+# sns.violinplot(data=df, y='hdpData_homeInfo_price', palette="tab10")
+```
+
+```{python}
+# sns.violinplot(data=df, x='hdpData_homeInfo_price', y="Clusters")
+# sns.violinplot(data=df, x='location_cluster',y='hdpData_homeInfo_price', palette="tab10")
+```
+
+## `kMeans` of price per square foot
+
+```{python}
+# from sklearn.cluster import KMeans
+
+# price = df['hdpData_homeInfo_price'].to_numpy()
+# square_footage = df['hdpData_homeInfo_livingArea'].to_numpy()
+
+# price_and_square_foot = np.dstack((price, square_footage))[0]
+
+# wcss = []
+# silhouette_scores = []
+
+# for i in range(3, 50):
+#     kmeans = KMeans(n_clusters=i, init="k-means++", n_init=20, random_state=42).fit(price_and_square_foot)
+#     wcss.append(kmeans.inertia_)
+#     silhouette_scores.append(silhouette_score(price_and_square_foot, kmeans.labels_))
+
+# plt.title("Price and Square Footage Inertia vs n_clusters")
+# plt.scatter(range(3, 50), wcss)
+# plt.show()
+
+# plt.title("Price and Square Footage Silhouette Score vs n_clusters")
+# plt.scatter(range(3, 50), silhouette_scores)
+# plt.show()
+
+# plt.title("Price and Square Footage Silhouette Score vs n_clusters")
+# plt.plot(range(3, 50), silhouette_scores)
+# plt.show()
+
+# kmeans = KMeans(n_clusters=10, init="k-means++", n_init=20,random_state=42).fit(price_and_square_foot)
+
+# df['ppsf_cluster'] = kmeans.labels_
+```
+
+```{python}
+
+# plt.title("Price and Square Footage Clusters")
+
+# sns.scatterplot(data=df, x='hdpData_homeInfo_price', y='hdpData_homeInfo_livingArea', hue='ppsf_cluster', palette="tab10")
+# plt.show()
+
+
+# plt.title("Price and Square Footage By Location")
+# sns.scatterplot(data=df, x=x, y=y, hue='ppsf_cluster', palette="tab10")
+# plt.show()
+```
+
+```{python}
+# plt.title("Price and Square Footage Clusters by Price")
+# sns.violinplot(data=df, x='ppsf_cluster',y='hdpData_homeInfo_price', palette="tab10")
+# plt.show()
+
+# plt.title("Price and Square Footage Clusters by Square Footage")
+# sns.violinplot(data=df, x='ppsf_cluster',y='hdpData_homeInfo_livingArea', palette="tab10")
+# plt.show()
+```
+
+## 3 dimensional `kMeans` of beds, baths, and square footage
+
+```{python}
+# from sklearn.cluster import KMeans
+
+# beds = df['hdpData_homeInfo_bedrooms'].to_numpy()
+# baths = df['hdpData_homeInfo_bathrooms'].to_numpy()
+# square_footage = df['hdpData_homeInfo_livingArea'].to_numpy()
+
+# cluster_data = np.dstack((beds, baths, square_footage))[0]
+
+# wcss = []
+# silhouette_scores = []
+
+# for i in range(3, 50):
+#     kmeans = KMeans(n_clusters=i, init="k-means++", n_init=20,
+#     random_state=42).fit(cluster_data)
+#     wcss.append(kmeans.inertia_)
+#     silhouette_scores.append(silhouette_score(cluster_data, kmeans.labels_))
+
+# plt.title("Beds, Baths and Square Footage Inertia vs n_clusters")
+# plt.scatter(range(3, 50), wcss)
+# plt.show()
+
+# plt.title("Beds, Baths and Square Footage Silhouette Score vs n_clusters")
+# plt.plot(range(3, 50), silhouette_scores)
+# plt.show()
+
+# kmeans = KMeans(n_clusters=11, init="k-means++", n_init=20,random_state=42).fit(cluster_data)
+
+# df['beds_bath_sf_cluster'] = kmeans.labels_
+```
+
+```{python}
+
+# plt.title("Price and Square Footage Clusters")
+
+# sns.scatterplot(data=df, x='hdpData_homeInfo_price', y='hdpData_homeInfo_livingArea', hue='ppsf_cluster', palette="tab10")
+# plt.show()
+
+
+# plt.title("Price and Square Footage By Location")
+# sns.scatterplot(data=df, x=x, y=y, hue='ppsf_cluster', palette="tab10")
+# plt.show()
+```
+
+```{python}
+# plt.title("Beds, Bath and Square Footage Clusters by Price")
+# sns.violinplot(data=df, x='beds_bath_sf_cluster',y='hdpData_homeInfo_price', palette="tab10")
+# plt.show()
+
+# plt.title("Price and Square Footage Clusters by Square Footage")
+# sns.violinplot(data=df, x='ppsf_cluster',y='hdpData_homeInfo_livingArea', palette="tab10")
+# plt.show()
+```
+
+# Single Feature Linear Regression
+
+## Initial OLS Single Feature Model
+
+To build our single feature linear regression model we are using `statsmodels` ordinary least
+squares (OLS) linear regression functionality. Initially we are building our model using the feature with the highest
+correlation to `price`
+
+```{python}
+# import statsmodels.formula.api as smf
+
+# feature = lr_train.corr()['price'].sort_values(ascending=False).index[1]
+
+# ols_model = smf.ols(formula=f"{target} ~ {feature}", data=lr_train)
+# result = ols_model.fit()
+
+# print(result.summary())
+```
+
+The result summary above shows a $R^2$ value of 0.415 with an insignificant p value for `area`. This
+indicates that `area` is a good starting point. Below we visualize the regression model.
+
+```{python}
+# params = dict(result.params)
+
+# plt.scatter(lr_train[feature], lr_train[target], color="steelblue", label="Train")
+# plt.scatter(lr_test[feature], lr_test[target], color="orange", label="Test")
+# x = range(0, 15000)
+# # Intentionally calculate the prediction for each X value
+# y = [((params[feature] * i) + params["Intercept"]) for i in x]
+# plt.plot(x, y, color="green")
+
+# # plt.suptitle(
+# #     f"Training Data: {target} against {feature}\n Slope: {params[feature]:.4f}, Intercept:{params['Intercept']:.4f}, $R^2$: {result.rsquared:.4f}"
+# # )
+# plt.suptitle(
+#         "Single Feature Training and Test Data vs. Regression Line"
+# )
+# plt.xlabel(feature)
+# plt.ylabel(target)
+# plt.legend()
+# plt.show()
+```
+
+
+This initial single feature model looks like a good start! There is a strong visual correlation between the
+regression line and the data. We can see that the test and training data look similar. We can start to calculate some statistics on the output of the model
+for comparison with other models:
+
+```{python}
+
+# ols_model = smf.ols(
+#     formula=f"{target} ~ {feature}", data=lr_train
+# )
+# result = ols_model.fit()
+
+# lr_predict = result.predict(lr_test[feature])
+
+# lr_y_test = list(lr_test[target])
+# lr_y_pred = list(lr_predict)
+
+# calc_model_stats("SF LinReg", lr_y_test, lr_y_pred)
+# plot_model_stats(fig_width=8)
+```
+
+These statistics give us an initial RMSE and $R^2$. These stats alone tell us that the we have
+a relationship between the target and feature. This is a good starting point to compare against other
+models.
+
+# Forward Selection
+
+Our next model builds on the single feature linear regression by adding more feature. We begin by
+finding the single feature model with the highest $R^2$ value. Then we add one feature at a time
+and calculate the $R^2$ value. We note the maximum $R^2$ value and continue to build the model until
+all features have been used. The model with the highest $R^2$ is then used to calculate the
+statistics for the Forward Selection model.
+
+```{python}
+# import statsmodels.formula.api as smf
+
+# (
+#     lr_train,
+#     lr_test,
+# ) = train_test_split(number_df, test_size=test_size, random_state=random_state)
+
+# feature_cols = lr_train.columns.drop(["price"]).to_list()
+
+# features = " + ".join(feature_cols)
+# best_features = []
+# best_rsquared = []
+# best_model = []
+
+# iterations = len(feature_cols)
+
+# for i in range(iterations):
+#     this_best_features = ""
+#     this_best_rsquared = 0
+#     this_best_model = None
+#     for feature in feature_cols:
+#         this_feature = " + ".join(best_features + [feature])
+#         ols_model = smf.ols(
+#             formula=f"{target} ~ {this_feature}", data=lr_train
+#         )
+#         result = ols_model.fit()
+#         if result.rsquared > this_best_rsquared:
+#             this_best_rsquared = result.rsquared
+#             this_best_features = feature
+#             this_best_model = result
+
+#     feature_cols.remove(this_best_features)
+#     best_features.append(this_best_features)
+#     best_rsquared.append(this_best_rsquared)
+#     best_model.append(this_best_model)
+
+# best_index = 0
+# max_rsquared = best_rsquared[0]
+
+# for i in range(1, len(best_rsquared)):
+#     if best_rsquared[i] > max_rsquared:
+#         max_rsquared = best_rsquared[i]
+#         best_index = i
+
+
+# print(" + ".join(best_features[0:best_index]))
+# print(best_rsquared[best_index])
+
+```
+
+The output from running forward selection yields a feature string of `area + lot_sqft + bathrooms +
+lotAreaValue`. On the training data this yields ar $R^2$ of 0.489.
+
+```{python}
+# lr_predict = best_model[best_index].predict(
+#     lr_test
+# )
+
+# lr_y_test = list(lr_test[target])
+# lr_y_pred = list(lr_predict)
+
+# calc_model_stats("FS LinReg", lr_y_test, lr_y_pred)
+
+# print(best_model[best_index].summary())
+```
+
+## Single Feature vs. Forward Selection Comparison
+
+Below we compare the RMSE and $R^2$ values of the single feature and forward selection models:
+
+:::{.column-page}
+
+```{python}
+#| echo: false
+# plot_model_stats(fig_width=8)
+```
+
+We can see that our forward selection model increases $R^2$ by 21.46%. These results show that
+forward selection multi feature linear regression produces a more accurate model than single feature
+linear regression.
+
+:::
+
+# `AdaboostRegressor`
+
+Another option for regression is the `sklearn` `AdaBoostRegressor`. This model has multiple
+parameters that can be tuned for optimal performance. We are going to focus on `max_estimators`
+and `max_depth`. In the code below we split the data into training and test sets and calculate
+$R^2$ vs the number of estimators:
+
+```{python}
+# from sklearn.ensemble import AdaBoostRegressor
+# from sklearn.tree import DecisionTreeRegressor
+
+# y_num = number_df[target].values
+# x_num = number_df.drop(labels=[target], axis=1)
+
+# (
+#     num_train_x,
+#     num_test_x,
+#     num_train_y,
+#     num_test_y,
+# ) = train_test_split(x_num, y_num, test_size=test_size, random_state=random_state)
+
+
+# y_num_bool = number_bool_df[target].values
+# x_num_bool = number_bool_df.drop(labels=[target], axis=1)
+
+# (
+#     num_bool_train_x,
+#     num_bool_test_x,
+#     num_bool_train_y,
+#     num_bool_test_y,
+# ) = train_test_split(
+#     x_num_bool, y_num_bool, test_size=test_size, random_state=random_state
+# )
+
+
+# adaboost_model = AdaBoostRegressor(random_state=42, n_estimators=100).fit(
+#     num_train_x, num_train_y
+# )
+# adaboost_y_pred = adaboost_model.predict(num_test_x)
+
+# max_estimators = 30
+# r_squared_list = []
+# train_r_squared_list = []
+# best_r_squared = 0
+# best_estimator = 0
+
+# for i in range(1, max_estimators):
+#     adaboost_model = AdaBoostRegressor(n_estimators=i, random_state=random_state).fit(
+#         num_train_x, num_train_y
+#     )
+#     adaboost_y_pred = adaboost_model.predict(num_test_x)
+#     r_squared = r2_score(num_test_y, adaboost_y_pred)
+#     r_squared_list.append(r_squared)
+
+#     if r_squared > best_r_squared:
+#         best_r_squared = r_squared
+#         best_estimator = i
+
+#     adaboost_y_pred = adaboost_model.predict(num_train_x)
+#     r_squared = r2_score(num_train_y, adaboost_y_pred)
+#     train_r_squared_list.append(r_squared)
+
+# plt.plot(range(1, max_estimators), train_r_squared_list, color="steelblue", label="Train")
+# plt.plot(range(1, max_estimators), r_squared_list, color="orange", label="Test")
+# plt.legend()
+# plt.xlabel("Number of Estimators")
+# plt.ylabel("$R^2$")
+# plt.title("AdaBoost: num_df $R^2$ vs. Number of Estimators")
+# plt.show()
+
+# print(best_r_squared)
+# print(best_estimator)
+```
+
+The above code computes the optimal `n_estimators` for the test data as `4`. There is strong correlation
+between the train and test data and we can be confident that our `n_estimators` value will
+produce an optimal result.
+
+In the code below we perform a similar
+process as above to compute the optimal `DecisionTreeRegressor` `max_depth`.
+
+```{python}
+
+# max_depth = 30
+# r_squared_list = []
+# train_r_squared_list = []
+# best_r_squared = 0
+# best_depth = 0
+
+# for i in range(1, max_depth):
+#     adaboost_model = AdaBoostRegressor(
+#         n_estimators=best_estimator,
+#         random_state=random_state,
+#         estimator=DecisionTreeRegressor(max_depth=i),
+#     ).fit(num_train_x, num_train_y)
+#     adaboost_y_pred = adaboost_model.predict(num_test_x)
+#     r_squared = r2_score(num_test_y, adaboost_y_pred)
+#     r_squared_list.append(r_squared)
+
+#     if r_squared > best_r_squared:
+#         best_r_squared = r_squared
+#         best_depth = i
+
+#     adaboost_y_pred = adaboost_model.predict(num_train_x)
+#     r_squared = r2_score(num_train_y, adaboost_y_pred)
+#     train_r_squared_list.append(r_squared)
+
+
+# plt.plot(range(1, max_depth), train_r_squared_list, color="steelblue", label="Train")
+# plt.plot(range(1, max_depth), r_squared_list, color="orange", label="Test")
+# plt.legend()
+# plt.xlabel("Max Depth")
+# plt.ylabel("$R^2$")
+# plt.title("AdaBoost: num_df $R^2$ vs. Max Depth")
+# plt.show()
+
+# print("Test Best R^2:", best_r_squared)
+# print("Test Best max_depth:", best_depth)
+```
+
+In the visualization above we see a significant divergence between the training and test data
+sets as we increase `max_depth`. This indicates that the as the model grows in depth it becomes
+more complex. This complexity leads to overfitting of the test data. To prevent overfitting we will use the best test max depth value of `4`.
+
+```{python}
+# adaboost_model = AdaBoostRegressor(
+#     random_state=42,
+#     n_estimators=best_estimator,
+#     estimator=DecisionTreeRegressor(max_depth=best_depth),
+# ).fit(num_train_x, num_train_y)
+# adaboost_y_pred = adaboost_model.predict(num_test_x)
+
+# calc_model_stats("AdaBoost", num_test_y, adaboost_y_pred)
+```
+
+```{python}
+# adaboost_model = AdaBoostRegressor(
+#     random_state=42,
+#     n_estimators=best_estimator,
+#     estimator=DecisionTreeRegressor(max_depth=best_depth),
+# ).fit(num_bool_train_x, num_bool_train_y)
+# adaboost_y_pred = adaboost_model.predict(num_bool_test_x)
+
+# calc_model_stats("AdaBoost num_bool", num_bool_test_y, adaboost_y_pred)
+```
+
+## Single Feature vs. Forward Selection vs. AdaBoostRegressor Comparison
+
+:::{.column-screen}
+
+```{python}
+#| echo: false
+# plot_model_stats()
+```
+
+:::
+
+The above visualization shows that `AdaBoostRegressor` improves $R^2$ by 16.99% over single
+feature linear regression. We also calculate $R^2$ using the number and boolean features in the
+`AdaBoost num_bool` column. This model performs slightly better that the optimized adaboost model.
+
+
+# XGBoost
+
+Our final model will be built using the `xgboost` `XGBRegressor` class. Our goal will be to
+optimize the hyperparameters of `XGBRegressor` to maximize $R^2$ on the test data set. The
+`XGBRegressor` is similar to `AdaBoostRegressor` and we will be optimizing the number of
+estimators (`n_estimators`) and the `max_depth` of the decision tree.
+
+
+As XGBoost is a flexible modeling tool it can handle boolean values. We will also create another
+data set containing the boolean values from the original dataframe and compare these against the
+numbers only dataset.
+
+## Feature Importance
+
+XGBoost is similar to RandomForest in that it can show the importance of features. We will use
+this on both the `num_df` and `num_bool_df` to find the most important features.
+
+```{python}
+# import xgboost as xgb
+
+# booster = "gbtree"
+
+# xgb_model = xgb.XGBRegressor(n_jobs=1, booster=booster).fit(num_train_x, num_train_y)
+# y_pred = xgb_model.predict(num_test_x)
+
+# xgb.plot_importance(xgb_model, title="num_df Feature Importance")
+# plt.show()
+```
+
+We can also look at our `num_bool_df` dataset to see if there are any boolean features that
+contribute positively to the prediction accuracy.
+
+:::{.column-page}
+
+```{python}
+
+# xgb_model = xgb.XGBRegressor(n_jobs=1, booster=booster).fit(num_bool_train_x, num_bool_train_y)
+# y_pred = xgb_model.predict(num_bool_test_x)
+
+# xgb.plot_importance(xgb_model, title="num_bool_df Feature Importance")
+# plt.show()
+```
+
+:::
+
+There may be a small increase in $R^2$ from inclusion of the boolean variables, specifically in
+features `has3DModel` and `hasVideo`. For now we will focus on the numerical model only
+
+
+```{python}
+# min_estimators = 3
+# max_estimators = 30
+# r_squared_list = []
+# train_r_squared_list = []
+
+# for i in range(min_estimators, max_estimators):
+#     xgb_model = xgb.XGBRegressor(n_estimators=i, random_state=random_state, booster=booster,
+#             max_depth=5).fit(
+#         num_train_x, num_train_y
+#     )
+#     xgb_y_pred = xgb_model.predict(num_test_x)
+#     r_squared_list.append(r2_score(num_test_y, xgb_y_pred))
+
+#     xgb_y_pred = xgb_model.predict(num_train_x)
+#     train_r_squared_list.append(r2_score(num_train_y, xgb_y_pred))
+
+# plt.plot(
+#     range(min_estimators, max_estimators),
+#     train_r_squared_list,
+#     color="steelblue",
+#     label="Train",
+# )
+# plt.plot(
+#     range(min_estimators, max_estimators), r_squared_list, color="orange", label="Test"
+# )
+# plt.legend()
+# plt.xlabel("Number of Estimators")
+# plt.ylabel("$R^2$")
+# plt.title("XGBoost: num_df $R^2$ vs. Number of Estimators")
+# plt.show()
+```
+
+```{python}
+# max_depth = 30
+# r_squared_list = []
+# train_r_squared_list = []
+# best_depth = 0
+# best_r_squared = 0
+
+# for i in range(1, max_depth):
+#     xgb_model = xgb.XGBRegressor(max_depth=i, n_estimators=best_estimator,
+#             random_state=random_state, booster=booster).fit(
+#         num_train_x, num_train_y
+#     )
+#     xgb_y_pred = xgb_model.predict(num_test_x)
+#     r_squared = r2_score(num_test_y, xgb_y_pred)
+#     r_squared_list.append(r_squared)
+
+#     if r_squared > best_r_squared:
+#         best_r_squared = r_squared
+#         best_depth = i
+
+#     xgb_y_pred = xgb_model.predict(num_train_x)
+#     r_squared = r2_score(num_train_y, xgb_y_pred)
+#     train_r_squared_list.append(r_squared)
+
+# plt.plot(range(1, max_estimators), train_r_squared_list, color="steelblue", label="Train")
+# plt.plot(range(1, max_estimators), r_squared_list, color="orange", label="Test")
+# plt.legend()
+# plt.xlabel("Max Depth")
+# plt.ylabel("$R^2$")
+# plt.title("XGBoost: num_df $R^2$ vs. Max Depth")
+# plt.show()
+# print(best_r_squared)
+# print(best_depth)
+
+# xgb_model = xgb.XGBRegressor(n_estimators=best_estimator, max_depth=best_depth, booster=booster).fit(num_train_x, num_train_y)
+# y_pred = xgb_model.predict(num_test_x)
+
+# calc_model_stats("XGBoost", num_test_y, y_pred)
+```
+
+We will also build a model on the `num_bool` `DataFrame`, passing the calculated depth and estimator
+values for `max_depth` and `n_estimators`. Will the addition of the boolean features increase
+$R^2$?
+
+```{python}
+# xgb_model = xgb.XGBRegressor(n_estimators=best_estimator, max_depth=best_depth, booster=booster).fit(num_bool_train_x, num_bool_train_y)
+# y_pred = xgb_model.predict(num_bool_test_x)
+
+# calc_model_stats("XGBoost num_bool", num_bool_test_y, y_pred)
+```
+
+```{python}
+# min_estimators = 3
+# max_estimators = 30
+# r_squared_list = []
+# train_r_squared_list = []
+# best_estimator = 0
+# best_r_squared = 0
+
+# for i in range(min_estimators, max_estimators):
+#     xgb_model = xgb.XGBRegressor(n_estimators=i, random_state=random_state, booster=booster).fit(
+#         num_bool_train_x, num_bool_train_y
+#     )
+#     xgb_y_pred = xgb_model.predict(num_bool_test_x)
+#     r_squared = r2_score(num_bool_test_y, xgb_y_pred)
+#     r_squared_list.append(r_squared)
+
+#     if r_squared > best_r_squared:
+#         best_r_squared = r_squared
+#         best_estimator = i
+
+#     xgb_y_pred = xgb_model.predict(num_bool_train_x)
+#     r_squared = r2_score(num_bool_train_y, xgb_y_pred)
+#     train_r_squared_list.append(r_squared)
+
+# plt.plot(
+#     range(min_estimators, max_estimators),
+#     train_r_squared_list,
+#     color="steelblue",
+#     label="Train",
+# )
+# plt.plot(
+#     range(min_estimators, max_estimators), r_squared_list, color="orange", label="Test"
+# )
+# plt.legend()
+# plt.xlabel("Number of Estimators")
+# plt.ylabel("$R^2$")
+# plt.title("XGBoost: num_bool_df $R^2$ vs. Number of Estimators")
+# plt.show()
+# print(best_r_squared)
+# print(best_estimator)
+```
+
+## Final Model Comparison
+
+:::{.column-screen}
+
+```{python}
+#| echo: false
+# plot_model_stats()
+```
+
+:::
+
+Interestingly we see that `XGBRegressor` performs significantly worse that `AdaBoostRegressor`. This
+is most likely to be due to a failure to tune the model parameters correctly. This may also be a
+factor data selected in the test and train data sets. It may be worthwhile to optimize xgboost
+further, but that falls outside the scope of this project.
+
+# Results \& Analysis {#sec-results}
+
+Something
+
+```{python}
+plot_model_stats()
+```
+
+# Conclusion {#sec-conclusion}
+
+In this project we used real world real estate listing data to predict housing prices. Starting with
+6052 entries and 86 columns, we
+cleaned and filtered the data set. This resulted in a dataset with 4220 entries and 6 numerical
+features. This data was split into training and test sets for input into our models. We then build
+the following models in order:
+
+1. Single Feature Linear Regression
+2. Forward Selection Linear Regression
+3. `AdaBoostRegressor`
+    * Optimized `n_estimators` and `max_depth`
+    * Compared number only dataset vs number and boolean dataset
+4. `XGBRegressor`
+    * Optimized `n_estimators` and `max_depth`
+    * Compared number only dataset vs number and boolean dataset
+
+From these models we concluded that `AdaBoostRegressor` with the `num_bool_df` resulted in the
+highest $R^2$ value and the lowest RMSE.
+
+We also used `xbg.plot_importance` to visualize the feature importance and found `area` and
+`lot_sqft` to be the most important features for predicting price.
+
+From all we can learn that many different modeling methods can produce similar results on a real
+world data set. There are more variables with more complex modeling methods (`AdaBoostRegressor` and
+        `XGBRegressor`) which may cause them to perform better or worse depending on the input
+parameters. In practice it is necessary to understand and optimize hyperparameters. This requires a
+strong understanding of both the hyperparameters and the underlying model. We find that this project
+provides a good starting point for further price prediction modeling.
+
+
+# Python Environment {#sec-code-env}
+
+Below are the versions of python and included libraries used for this project:
+
+```{python}
+#| code-fold: true
+
+
+import sys
+print("Python Version:", sys.version)
+
+# Print module versions: https://stackoverflow.com/a/49199019
+import pkg_resources
+import types
+def get_imports():
+    for name, val in globals().items():
+        if isinstance(val, types.ModuleType):
+            name = val.__name__.split(".")[0]
+
+        elif isinstance(val, type):
+            name = val.__module__.split(".")[0]
+
+        poorly_named_packages = {
+            "PIL": "Pillow",
+            "sklearn": "scikit-learn"
+        }
+        if name in poorly_named_packages.keys():
+            name = poorly_named_packages[name]
+
+        yield name
+imports = list(set(get_imports()))
+
+requirements = []
+for m in pkg_resources.working_set:
+    if m.project_name in imports and m.project_name!="pip":
+        requirements.append((m.project_name, m.version))
+
+for r in requirements:
+    print("{}=={}".format(*r))
+```
+
+[zillow]: https://www.zillow.com
+[redfin]: https://www.redfin.com
+[scraper.py]: https://github.com/simmsa/dtsa_5510_final/blob/main/scraper.py
+[formatter.py]: https://github.com/simmsa/dtsa_5510_final/blob/main/formatter.py
+[zip_codes.json]: https://github.com/simmsa/dtsa_5510_final/blob/main/zip_codes.json
+[scrapfly]: https://scrapfly.io/blog/how-to-scrape-zillow/#scraping-zillow-properties
+[MLS]: https://mls.com
+[great_schools]: https://www.redfin.com/definition/great-schools-rating
