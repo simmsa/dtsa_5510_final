@@ -1,0 +1,42 @@
+/*-- scss:defaults --*/
+$body-bg: #fff;
+$body-color: rgb(40, 44, 52);
+$link-color: #42affa;
+$font-color: rgb(30, 30, 30) !important;
+$font-family-sans-serif: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+$presentation-font-size-root: "30px";
+$presentation-heading-letter-spacing: "3.5px";
+$presentation-heading-font-weight: 300;
+$presentation-heading-text-transform: "uppercase";
+$presentation-h1-font-size: 1.4em;
+$presentation-h2-font-size: 1.25em;
+
+$code-color: #3498db;
+figcaption, .caption {
+    text-align: center;
+    top: -20px;
+    position: relative;
+    font-size: 0.5em !important;
+}
+
+li {
+    font-size: 0.8em !important;
+}
+
+code {
+    font-size: 0.8em !important;
+}
+
+table {
+    font-size: 0.3em !important;
+}
+
+
+
+// Base document colors
+// $body-bg: #181818;
+// $body-color: white;
+// $link-color: #75AADB;
+// Code blocks
+// $code-block-bg-alpha: -.8;
+
