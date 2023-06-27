@@ -1,0 +1,45 @@
+,0
+listingTimezone,US/Mountain
+numBeds,2
+numBaths,3.0
+listingPrice,800000
+lastSoldPrice,490000
+lastSoldDate,1455264000000
+isServiced,True
+isActivish,True
+isHidden,False
+isVisibilityRestricted,False
+soldDate,1455264000000
+soldDateTimeZone,US/Mountain
+searchStatusId,8
+dataSources,[]
+historicalGraphEnabled,True
+sectionPreviewText,Estimate Not Available
+queryId,7fd69b9c-c09b-8f5a-1e1b-b39891ed9b67
+displayLevel,1
+propertyId,56957813
+sqFt_displayLevel,1
+sqFt_value,4218
+latLong_latitude,39.8936111
+latLong_longitude,-105.1399208
+priceInfo_amount,800000
+priceInfo_label,Listed at Price
+priceInfo_displayLevel,1
+priceInfo_dataSourceId,94
+streetAddress_streetNumber,12701
+streetAddress_directionalPrefix,
+streetAddress_streetName,Meadowlark
+streetAddress_streetType,Ln
+streetAddress_directionalSuffix,
+streetAddress_unitType,
+streetAddress_unitValue,
+streetAddress_addressDisplayLevel_displayLevel,1
+streetAddress_addressDisplayLevel_displayText,
+streetAddress_addressDisplayLevel_dataSourceId,94
+streetAddress_assembledAddress,12701 Meadowlark Ln
+streetAddress_includeStreetNumber,True
+streetAddress_includeUnitNumber,True
+streetAddress_includeStreetName,True
+random_seed,160449700519310
+random_nextNextGaussian,0.0
+random_haveNextNextGaussian,False

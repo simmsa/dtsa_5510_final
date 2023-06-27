@@ -1,0 +1,193 @@
+---
+title: "Redfin Integration Test"
+author: "Andrew Simms"
+date: today
+
+format:
+    html:
+        theme: [custom.scss]
+        mainfont: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif'
+        monofont: "Menlo"
+        fontsize: "16px"
+        code-overflow: wrap
+
+table-of-contents: true
+number-sections: true
+embed-resources: true
+---
+
+
+```{python}
+import json
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+
+from sklearn.metrics import silhouette_score
+
+from redfin import Redfin
+
+sns.set_theme()
+```
+
+```{python}
+
+with open("2023_04_22-17_57_52_10_mi_radius_unique_denver_area.json", "r") as f:
+    housing_json = json.load(f)
+
+df_list = []
+
+for listing in housing_json:
+    flattened_listing = pd.json_normalize(housing_json[listing], sep="_")
+    df_list.append(flattened_listing)
+
+
+df = pd.concat(df_list)
+
+def extract_address(url):
+    parts = url.split("/")[2].split("-")
+    return " ".join(parts)
+
+# print(df.iloc[0])
+# address = data["detailUrl"].split("/")[2].split("-")
+# res["address"] = " ".join(address)
+df["address"] = df['detailUrl'].apply(extract_address)
+
+
+print(df.info())
+print(df.columns)
+```
+
+## Redfin Test
+
+```{python}
+client = Redfin()
+
+# for item, row in df.iterrows():
+#     address = row["address"]
+#     print(address)
+
+df_dict_list = df.to_dict(orient='records')
+
+print(type(df_dict_list))
+print(df_dict_list[0].keys())
+
+for listing in df_dict_list:
+    address = listing['address']
+    print(address)
+
+    response = client.search(address)
+
+    try:
+        url = response['payload']['exactMatch']['url']
+    # print(url)
+    except KeyError:
+        continue
+
+    initial_info = client.initial_info(url)
+
+    property_id = initial_info['payload']['propertyId']
+
+    # print(property_id)
+
+    mls_data = client.below_the_fold(property_id)
+
+    mls_data_df = pd.json_normalize(mls_data["payload"], sep="_")
+    # print(mls_data_df.columns)
+
+    # mls_data_df.T.to_csv(f"{i}_mls_data_df.csv")
+
+    # print(str(mls_data_df["schoolsAndDistrictsInfo_sectionPreviewText"]).split(" "))
+    schools_rating = float(mls_data_df["schoolsAndDistrictsInfo_sectionPreviewText"][0].split(" ")[2])
+    print("SCHOOLS_RATING:", schools_rating)
+    listing["schools_rating"] = schools_rating
+
+    school_district = mls_data['payload']["schoolsAndDistrictsInfo"]['districtsServingThisHome'][0]["districtName"]
+    listing['school_district'] = school_district
+
+    print(mls_data['payload']['publicRecordsInfo']['basicInfo'])
+
+    try:
+        listing["num_stories"] = mls_data['payload']['publicRecordsInfo']['basicInfo']["numStories"]
+    except KeyError:
+        pass
+
+    try:
+        listing["year_built"] = mls_data['payload']['publicRecordsInfo']['basicInfo']["yearBuilt"]
+    except KeyError:
+        pass
+
+    try:
+        listing["year_renovated"] = mls_data['payload']['publicRecordsInfo']['basicInfo']["yearRenovated"]
+    except KeyError:
+        pass
+
+    try:
+        listing["sq_ft_finished"] = mls_data['payload']['publicRecordsInfo']['basicInfo']["sqFtFinished"]
+    except KeyError:
+        pass
+
+    try:
+        listing["total_sq_ft"] = mls_data['payload']['publicRecordsInfo']['basicInfo']["totalSqFt"]
+    except KeyError:
+        pass
+
+    try:
+        listing["lot_sq_ft"] = mls_data['payload']['publicRecordsInfo']['basicInfo']["lotSqFt"]
+    except KeyError:
+        pass
+
+    try:
+        listing["taxable_land_value"] = mls_data['payload']['publicRecordsInfo']['taxInfo']["taxableLandValue"]
+    except KeyError:
+        pass
+
+    try:
+        listing["taxable_improvement_value"] = mls_data['payload']['publicRecordsInfo']['taxInfo']["taxableImprovementValue"]
+    except KeyError:
+        pass
+
+    try:
+        listing["county_name"] = mls_data['payload']['publicRecordsInfo']['countyName']
+    except KeyError:
+        pass
+
+    print("SCHOOL_DISTRICT:", school_district)
+
+    super_groups = mls_data['payload']["amenitiesInfo"]['superGroups']
+    # ammenities_super_group = mls_data['payload']["amenitiesInfo"]['superGroups'][0]["amenityGroups"]
+
+    for super_group in super_groups:
+        # print(super_group)
+        groups = super_group["amenityGroups"]
+        # print(groups)
+        for group in groups:
+            title = group['groupTitle']
+            entries = group['amenityEntries']
+            # print(group)
+            # print(title)
+            # print(entries)
+
+            for entry in entries:
+                listing[f"{title.lower().replace(' ', '_')}_{entry['referenceName']}"] = entry['amenityValues'][0]
+                print(f"{title.lower().replace(' ', '_')}_{entry['referenceName']}: {entry['amenityValues'][0]}")
+
+
+    # listing_id = initial_info['payload']['listingId']
+    # avm_details = client.avm_details(property_id, listing_id)
+
+    # avm_details_df = pd.json_normalize(avm_details["payload"], sep="_")
+
+    # # print(avm_details_df.columns)
+
+    # avm_details_df.T.to_csv(f"{i}_avm_details_df.csv")
+
+output_df = pd.DataFrame(df_dict_list)
+
+print(output_df.info(verbose=True, show_counts=True))
+print(output_df.columns)
+
+output_df.to_csv("2023_04_22-17_57_52_10_mi_radius_unique_denver_area_w_redfin.csv")
+```
